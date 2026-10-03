@@ -51,9 +51,12 @@ def main():
     print(f"{len(prompts)} prompts loaded")
 
     tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=a.trust)
-    model = AutoModelForCausalLM.from_pretrained(
-        a.model, torch_dtype=torch.float32, trust_remote_code=a.trust
-    ).eval()
+    model, info = AutoModelForCausalLM.from_pretrained(
+        a.model, torch_dtype=torch.float32, trust_remote_code=a.trust,
+        output_loading_info=True)
+    model.eval()
+    print("MISSING keys (randomly initialised!):", info.get("missing_keys"))
+    print("UNEXPECTED keys:", info.get("unexpected_keys"))
     cfg = model.config
     N = cfg.num_hidden_layers
     head, norm = find_parts(model)
