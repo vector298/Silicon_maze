@@ -4,8 +4,7 @@
 pip install pandas scikit-learn lightgbm networkx scipy
 cd shadow_network
 python run.py --data ../data/upload_structure --out submission          # main
-python run.py --variant m_only   --out submission_m_only                 # task-2 alternative
-python run.py --variant ato_only --out submission_ato_only               # task-2 alternative
+python run.py --out submission_v2                                         # v2: test-window timestamps
 python validate1.py                                                      # task-1 train->validation check
 ```
 

@@ -76,7 +76,7 @@ def campaign_clusters(allm, types, extra_members):
     return lab
 
 
-def main(data, out, variant):
+def main(data, out, variant, ts_mode):
     os.makedirs(out, exist_ok=True)
     tr, va, te, meta = load(data)
     lab = pd.concat([tr, va])
@@ -97,10 +97,17 @@ def main(data, out, variant):
 
     comp_ts = {}
     host_types = {"all": ("M", "MIX"), "m_only": ("M",), "ato_only": ()}[variant]
+    # Compromise is scored on the test window: flag only hostile accounts that
+    # are active in it, timestamped at their first test transmission (the
+    # convention of the organisers' sample submission).
+    first_test = te.groupby("sender_id").ts.min()
     for a in A.index[A.typ.isin(host_types)]:
-        comp_ts[a] = A.first_bad_ts[a]
+        if a in first_test.index:
+            comp_ts[a] = first_test[a] if ts_mode == "first_test" else A.first_bad_ts[a]
     for s in (sw, sw_test):
         for a, ts in s.items():
+            if ts_mode == "first_test" and a in first_test.index:
+                ts = max(ts, first_test[a])
             comp_ts.setdefault(a, ts)
     # Messages of takeover accounts after the takeover follow M-type behaviour.
     for a, ts in pd.concat([sw, sw_test]).items():
@@ -117,7 +124,9 @@ def main(data, out, variant):
     def cid(a):
         if a in camp:
             return f"CAM_CLUSTER_{camp[a]:03d}"
-        return {"MIX": "CAM_CLUSTER_MIX", "S": "CAM_CLUSTER_SUS"}.get(types[a], "CAM_CLUSTER_BENIGN")
+        # MIX/S accounts show no campaign structure (no shared targets, devices,
+        # timing or internal messaging), so they stay with the background.
+        return "CAM_CLUSTER_BENIGN"
     t3 = pd.DataFrame({"account_id": accounts, "cluster_id": accounts.map(cid)})
 
     t1.to_csv(f"{out}/task1_predictions.csv", index=False)
@@ -145,5 +154,7 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="submission")
     ap.add_argument("--variant", default="all", choices=["all", "m_only", "ato_only"],
                     help="which hostile account types count as compromised in task 2")
+    ap.add_argument("--ts", default="first_test", choices=["first_test", "first_bad"],
+                    help="compromise timestamp: first test message, or first bad labelled message")
     a = ap.parse_args()
-    main(a.data, a.out, a.variant)
+    main(a.data, a.out, a.variant, a.ts)
