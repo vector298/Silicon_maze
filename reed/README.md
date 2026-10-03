@@ -11,6 +11,5 @@ Predict 12 structural properties of each computational graph from its runtime fi
 
 Grouped CV: E ≈ 6.86 → score ≈ 0.50 (k = 10).
 
-Train column → submission column: `num_edges`→`operation_connectivity`,
-`degree_skewness`→`connectivity_imbalance`, `degree_kurtosis`→`connectivity_extremity`,
-`degree_95_percentile`→`high_end_threshold`; the others keep their names.
+Submission uses the training column names (`num_edges`, `degree_skewness`, `degree_kurtosis`,
+`degree_95_percentile`, ...) — the grader rejects the sample-submission aliases.

@@ -6,10 +6,7 @@ import pandas as pd
 TARGETS = ['num_edges', 'degree_std', 'max_degree', 'num_sink_nodes', 'num_unique_opcodes',
            'opcode_entropy', 'degree_skewness', 'degree_kurtosis', 'degree_95_percentile',
            'in_degree_std', 'out_degree_std', 'num_degree_1_nodes']
-# submission column names, in the same order as TARGETS
-SUB_COLS = ['operation_connectivity', 'degree_std', 'max_degree', 'num_sink_nodes', 'num_unique_opcodes',
-            'opcode_entropy', 'connectivity_imbalance', 'connectivity_extremity', 'high_end_threshold',
-            'in_degree_std', 'out_degree_std', 'num_degree_1_nodes']
+SUB_COLS = TARGETS  # grader expects the training column names
 
 
 def split_id(gid):
