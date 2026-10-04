@@ -216,8 +216,36 @@ def domain_of(s):
     if "@" in s:
         s = s.split("@", 1)[1]
     s = re.sub(r"^[a-z]+://", "", s).split("/")[0].split("?")[0]
-    s = re.sub(r"^www\d?\.", "", s)
+    s = re.sub(r"^www\d?\.", "", s).replace("-", "").strip(".")
     return s if "." in s else ""
+
+
+def domains_of(s):
+    """All domains in a field that may hold several values or junk ("a-b.com,ab")."""
+    return [d for d in (domain_of(x) for x in re.split(r"[,;|\s]+", s)) if d]
+
+
+def skeleton(core):
+    """S.W.O.R.D. style abbreviation: drop inner vowels of words with 4+ letters
+    ("shakti food" -> "shkt fd", "great enterprises" -> "grt entrprss")."""
+    out = []
+    for t in core.split():
+        if len(t) >= 4 and t.isalpha():
+            t = t[0] + re.sub(r"[aeiou]", "", t[1:])
+        out.append(re.sub(r"(.)\1+", r"\1", t))
+    return " ".join(out)
+
+
+COUNTRY = {"in": "in", "ind": "in", "india": "in", "bharat": "in", "us": "us", "usa": "us", "u s": "us",
+           "u s a": "us", "united states": "us", "united states of america": "us", "america": "us",
+           "fr": "fr", "fra": "fr", "france": "fr", "republique francaise": "fr"}
+_STREETY = re.compile(r"\b(st|street|rd|road|ave|avenue|blvd|lane|ln|dr|drive|nagar|marg|rue|floor|flr|plot|"
+                      r"sector|block|house|h no|po box|suite|apt)\b")
+_JUNK = re.compile(r"\b(null|none|nan|n a|na|unknown)\b")
+
+
+def addr_like(s):
+    return bool(re.search(r"\d", s)) and bool(_STREETY.search(s))
 
 
 def digits(s):
@@ -234,35 +262,45 @@ def prepare(df, m):
     yr = g("year").str.extract(r"((?:19|20)\d\d)")[0]
     R["year"] = pd.to_numeric(yr, errors="coerce").fillna(-1).astype(int).values
 
-    name = g("name").map(norm)
+    name = g("name").map(norm).str.replace(_JUNK, " ", regex=True).str.split().str.join(" ")
+    addr0 = g("address").map(norm).str.replace(_JUNK, " ", regex=True).str.split().str.join(" ")
+    # name and address sometimes arrive swapped
+    swap = name.map(addr_like) & ~addr0.map(addr_like)
+    name, addr0 = name.where(~swap, addr0), addr0.where(~swap, name)
+    log(f"  swapped name/address on {int(swap.sum()):,} records")
     R["name"] = name.values
     R["name_fold"] = name.map(fold).values
-    core = name.map(lambda s: " ".join(t for t in s.split() if t not in LEGAL))
+    legal_skel = {skeleton(t) for t in LEGAL if len(skeleton(t)) >= 4}
+    core = name.map(lambda s: " ".join(t for t in s.split() if t not in LEGAL and skeleton(t) not in legal_skel))
     R["core"] = core.values
     R["core_compact"] = core.str.replace(" ", "", regex=False).values
+    R["skel"] = core.map(skeleton).values
+    R["skel_compact"] = R["skel"].str.replace(" ", "", regex=False).values
 
     city_raw = g("city").map(norm)
-    addr = (g("address")).map(norm).map(lambda s: " ".join(ADDR_MAP.get(t, t) for t in s.split()))
+    addr = addr0.map(lambda s: " ".join(ADDR_MAP.get(t, t) for t in s.split()))
     R["addr"] = addr.values
     pc_col = g("postcode").map(digits)
     pc_addr = addr.str.extract(r"\b(\d{5,6})\b")[0].fillna("")
     R["postcode"] = np.where(pc_col.str.len() >= 4, pc_col, pc_addr)
-    R["housenum"] = addr.str.extract(r"^(?:[a-z]{0,3}\s)?(\d{1,5}[a-z]?)\b")[0].fillna("").values
+    R["housenum"] = addr.str.extract(r"\b(\d{1,5}[a-z]?)\b")[0].fillna("").values
+    R["addr_nums"] = addr.map(lambda s: frozenset(re.findall(r"\d+", s))).values
     R["housenum"] = np.where(R["housenum"] == R["postcode"], "", R["housenum"])
     R["street_toks"] = addr.map(lambda s: [t for t in s.split() if len(t) >= 3 and not t.isdigit()
                                            and t not in ADDR_STOP]).values
     R["city"] = city_raw.values
-    R["country"] = g("country").map(norm).values
+    R["country"] = g("country").map(norm).map(lambda c: COUNTRY.get(c, c)).values
 
     ph = g("phone").map(digits)
     R["p9"] = ph.map(lambda d: d[-9:] if len(d) >= 7 else "").values
     R["p7"] = ph.map(lambda d: d[-7:] if len(d) >= 7 else "").values
     em = g("email").str.strip().str.lower()
-    R["email_dom"] = em.map(domain_of).values
+    R["email_dom"] = em.map(lambda s: domain_of(s.split(",")[0])).values
     R["email_local"] = em.map(lambda s: s.split("@")[0] if "@" in s else "").values
-    R["web_dom"] = g("website").map(domain_of).values
+    webs = g("website").map(domains_of)
+    R["web_dom"] = webs.map(lambda x: x[0] if x else "").values
     # emails sometimes land in the website column and vice versa
-    R["doms"] = [sorted({d for d in (a, b) if d}) for a, b in zip(R["email_dom"], R["web_dom"])]
+    R["doms"] = [sorted(set(w) | set(domains_of(e))) for w, e in zip(webs, em)]
     stems = R["doms"].map(lambda ds: " ".join(GENERIC_TLD.sub("", d).replace(".", " ").replace("-", "")
                                                 for d in ds))
     R["brand"] = (R["core"] + " " + stems).str.strip().values
@@ -301,6 +339,44 @@ def explode_keys(lists):
     return keys, idx
 
 
+def knn_pairs(X, k=8, thr=0.5, max_df=1000, chunk=2000):
+    """Top-k cosine neighbours on a TF-IDF matrix, ignoring very common n-grams."""
+    n = X.shape[0]
+    df = np.diff(X.tocsc().indptr)
+    keep = np.flatnonzero((df >= 2) & (df <= max_df))
+    X = X[:, keep].tocsr().astype(np.float32)
+    nr = np.sqrt(np.asarray(X.multiply(X).sum(1)).ravel())
+    X = sp.diags(1 / np.maximum(nr, 1e-9)).astype(np.float32) @ X
+    XT = X.T.tocsr()
+    out = []
+    for s0 in range(0, n, chunk):
+        S = (X[s0:s0 + chunk] @ XT).tocoo()
+        m = (S.data >= thr) & (S.row + s0 != S.col)
+        r, c, v = S.row[m] + s0, S.col[m], S.data[m]
+        if not len(r):
+            continue
+        o = np.lexsort((-v, r))
+        r, c = r[o], c[o]
+        first = np.searchsorted(r, r, side="left")
+        sel = (np.arange(len(r)) - first) < k
+        r, c = r[sel].astype(np.int64), c[sel].astype(np.int64)
+        out.append(np.minimum(r, c) * n + np.maximum(r, c))
+    return np.unique(np.concatenate(out)) if out else np.zeros(0, np.int64)
+
+
+def snm_pairs(keys, n, w=3):
+    """Sorted neighbourhood: pair each non-empty key with its next w neighbours in sort order."""
+    idx = np.flatnonzero(keys != "")
+    if len(idx) < 2:
+        return np.zeros(0, np.int64)
+    o = idx[np.argsort(keys[idx], kind="stable")]
+    out = []
+    for d in range(1, w + 1):
+        a, b = o[:-d], o[d:]
+        out.append(np.minimum(a, b).astype(np.int64) * n + np.maximum(a, b))
+    return np.concatenate(out)
+
+
 def block(R):
     n = len(R)
     allp = []
@@ -333,6 +409,27 @@ def block(R):
     add("house+pc", np.where((R["housenum"] != "") & (R["postcode"] != ""),
                              R["housenum"] + "|" + R["postcode"], ""), ar, 40)
     add("report", R["report"].values, ar, 25)
+    if os.environ.get("GRC_NEWBLOCKS", "1") != "1":
+        allp = np.concatenate(allp)
+        keys, cnt = np.unique(allp, return_counts=True)
+        return (keys // n).astype(np.int64), (keys % n).astype(np.int64), cnt.astype(np.float32)
+    add("core_exact", np.where(R["core_compact"].str.len() >= 4, R["core_compact"], ""), ar, 80)
+    add("skel_exact", np.where(R["skel_compact"].str.len() >= 3, R["skel_compact"], ""), ar, 80)
+    sk = R["skel"].map(lambda s: sorted({t for t in s.split() if len(t) >= 3})).tolist()
+    k, i = explode_keys(sk)
+    add("skel_tok", k, i, 40)
+    k2 = np.array([a + "|" + R["loc"].iat[b] for a, b in zip(k, i)], dtype=object) if len(k) else k
+    add("skel_tok+loc", k2, i, 60)
+    skc = R["skel_compact"].to_numpy(dtype=object)
+    p = np.concatenate([snm_pairs(skc, n, 3), snm_pairs(np.array([x[::-1] for x in skc], dtype=object), n, 3)])
+    log(f"    block {'skel_snm':<14} {len(p):>10,} pairs")
+    allp.append(p)
+    p = knn_pairs(tfidf_mat(R["skel"], analyzer="char_wb", ngram_range=(3, 3)), k=10, thr=0.45)
+    log(f"    block {'skel_knn':<14} {len(p):>10,} pairs")
+    allp.append(p)
+    p = knn_pairs(tfidf_mat(R["addr"], analyzer="char_wb", ngram_range=(3, 3)), k=8, thr=0.55)
+    log(f"    block {'addr_knn':<14} {len(p):>10,} pairs")
+    allp.append(p)
     at = R["alltext"].map(lambda s: sorted({t for t in s.split() if len(t) >= 4})).tolist()
     k, i = explode_keys(at)
     add("rare_text", k, i, 6)
@@ -377,7 +474,17 @@ class World:
             "addr_w": tfidf_mat(R["addr"], analyzer="word", token_pattern=r"\S+"),
             "all_c": tfidf_mat(R["alltext"], analyzer="char_wb", ngram_range=(3, 4)),
             "all_w": tfidf_mat(R["alltext"], analyzer="word", token_pattern=r"\S+"),
+            "skel_c": tfidf_mat(R["skel"], analyzer="char_wb", ngram_range=(2, 3)),
+            "skel_w": tfidf_mat(R["skel"], analyzer="word", token_pattern=r"\S+"),
         }
+        cc = R["core_compact"].where(R["core_compact"] != "", None)
+        per = 1e5 / max(1, self.n)  # counts as a rate per 100k records, so worlds of any size compare
+        self.core_cnt = np.log1p(per * cc.map(cc.value_counts()).fillna(0).to_numpy(np.float32))
+        cl = (R["core_compact"] + "|" + R["loc"]).where(R["core_compact"] != "", None)
+        self.coreloc_cnt = np.log1p(per * cl.map(cl.value_counts()).fillna(0).to_numpy(np.float32))
+        sc = R["skel_compact"].where(R["skel_compact"] != "", None)
+        self.skel_cnt = np.log1p(per * sc.map(sc.value_counts()).fillna(0).to_numpy(np.float32))
+        self.nums = R["addr_nums"].to_numpy(dtype=object)
         p9 = R["p9"].str.zfill(9).where(R["p9"] != "", "")
         self.P = np.array([[ord(c) - 48 for c in s] if s else [-1] * 9 for s in p9], np.int8)
         self.has_p = (R["p9"] != "").to_numpy()
@@ -419,7 +526,7 @@ class World:
         dm = ((d1i == d1j) | (d1i == d2j) | (d2i == d1j) | (d2i == d2j)) & (d1i != "") & (d1j != "")
         F["dom_eq"] = np.where((d1i != "") & (d1j != ""), dm.astype(np.float32), -1)
         fq = self.dom_freq.reindex(d1i).fillna(0).to_numpy()
-        F["dom_freq"] = np.where(dm, np.log1p(fq), -1).astype(np.float32)
+        F["dom_freq"] = np.where(dm, np.log1p(fq * 1e5 / self.n), -1).astype(np.float32)
         yi, yj = self.year[i], self.year[j]
         by = (yi > 0) & (yj > 0)
         F["year_diff"] = np.where(by, np.abs(yi - yj), -1).astype(np.float32)
@@ -439,10 +546,19 @@ class World:
         for s in known_sources:
             F["src_" + s] = ((si == s).astype(np.float32) + (sj == s))
         F["nkeys"] = nkeys
+        for nm_, arr in (("core_cnt", self.core_cnt), ("coreloc_cnt", self.coreloc_cnt), ("skel_cnt", self.skel_cnt)):
+            F[nm_ + "_min"] = np.minimum(arr[i], arr[j])
+            F[nm_ + "_max"] = np.maximum(arr[i], arr[j])
+        ni, nj = self.nums[i], self.nums[j]
+        inter = np.fromiter((len(a & b) for a, b in zip(ni, nj)), np.float32, len(i))
+        uni = np.fromiter((len(a | b) for a, b in zip(ni, nj)), np.float32, len(i))
+        both = np.fromiter((bool(a) and bool(b) for a, b in zip(ni, nj)), bool, len(i))
+        F["num_jacc"] = np.where(both, inter / np.maximum(uni, 1), -1).astype(np.float32)
+        F["num_conflict"] = np.where(both, (inter == 0).astype(np.float32), -1)
         if deg is None:
             deg = np.bincount(i, minlength=self.n) + np.bincount(j, minlength=self.n)
-        F["deg_min"] = np.minimum(deg[i], deg[j]).astype(np.float32)
-        F["deg_max"] = np.maximum(deg[i], deg[j]).astype(np.float32)
+        F["deg_min"] = (1e5 / self.n) * np.minimum(deg[i], deg[j]).astype(np.float32)
+        F["deg_max"] = (1e5 / self.n) * np.maximum(deg[i], deg[j]).astype(np.float32)
         return pd.DataFrame(F)
 
 
