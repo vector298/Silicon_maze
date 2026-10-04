@@ -96,7 +96,7 @@ def main(data, out, variant, ts_mode):
           f"test switchers: {list(sw_test.index)}")
 
     comp_ts = {}
-    host_types = {"all": ("M", "MIX"), "m_only": ("M",), "ato_only": ()}[variant]
+    host_types = {"all": ("M", "MIX"), "m_only": ("M",), "ato_only": (), "s_only": ("S",)}[variant]
     # Compromise is scored on the test window: flag only hostile accounts that
     # are active in it, timestamped at their first test transmission (the
     # convention of the organisers' sample submission).
@@ -104,7 +104,11 @@ def main(data, out, variant, ts_mode):
     for a in A.index[A.typ.isin(host_types)]:
         if a in first_test.index:
             comp_ts[a] = first_test[a] if ts_mode == "first_test" else A.first_bad_ts[a]
-    for s in (sw, sw_test):
+        elif variant == "s_only":
+            comp_ts[a] = A.first_bad_ts[a]
+    # Takeover accounts are added except for s_only: leaderboard feedback (no
+    # change when the M/MIX set shrank) suggests they are not counted.
+    for s in (sw, sw_test) if variant != "s_only" else ():
         for a, ts in s.items():
             if ts_mode == "first_test" and a in first_test.index:
                 ts = max(ts, first_test[a])
@@ -152,7 +156,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="../data/upload_structure")
     ap.add_argument("--out", default="submission")
-    ap.add_argument("--variant", default="all", choices=["all", "m_only", "ato_only"],
+    ap.add_argument("--variant", default="all", choices=["all", "m_only", "ato_only", "s_only"],
                     help="which hostile account types count as compromised in task 2")
     ap.add_argument("--ts", default="first_test", choices=["first_test", "first_bad"],
                     help="compromise timestamp: first test message, or first bad labelled message")
